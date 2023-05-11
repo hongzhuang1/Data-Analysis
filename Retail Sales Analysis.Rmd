@@ -1,0 +1,510 @@
+---
+title: "Retail Sales Analysis in R"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+The task of the project is to analyze the chips sales and customers' purchasing behavior. To identify the sales drivers, we are interested in knowing which customer segment spends the most and their purchasing behavior. For example, we want to explore whether they have a preference for a particular brand or pack size.
+
+Based on the insights, we come up with actionable recommendations for sales managers. 
+```{r}
+# load relevant packages
+library(data.table)
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(stringr)
+```
+
+```{r}
+#load data and read it as data table
+transaction_data <- data.table(fread("transactions_data.csv"))
+customer_data <- data.table(fread("purchase_behaviour.csv"))
+```
+
+```{r}
+# check the number of rows and columns in each dataset
+dim(transaction_data)
+dim(customer_data)
+```
+
+```{r}
+# rename columns for easier understanding 
+# first, change the column names to lowercase
+names(transaction_data) <- tolower(names(transaction_data))
+names(customer_data) <- tolower(names(customer_data))
+
+# change the 'lylty_card_nbr' to 'customer_id' 
+names(transaction_data)[3] <- 'customer_id'
+names(customer_data)[1] <- 'customer_id'
+```
+
+```{r}
+# view the head rows of each dataset 
+head(transaction_data, 5)
+```
+```{r}
+head(customer_data, 5)
+```
+Data Cleaning
+- Convert the data type if a variable is not correctly formatted
+- Handle missing values if there is any  
+- Handle duplicates if there is any 
+
+```{r}
+# use str() to get the data type information about each variable
+str(transaction_data)
+```
+The column 'date' is not in a date format. Let's convert it to date type
+```{r}
+transaction_data$date <- as.Date(transaction_data$date, format="%m/%d/%y")
+```
+
+```{r}
+# check if there is any missing values 
+lapply(transaction_data, function(x) sum(is.na(x)))
+```
+
+```{r}
+# check the number of unique values in each columns in transaction_data table
+transaction_data %>% summarize_all(n_distinct)
+```
+Since we are interested in analyzing chips only, we need to identify chips products by analyzing the product names first. From the output above, there are total 114 unique product names, and each unique product number is associated with a unique product name.
+```{r}
+# get the list of unique product names 
+products <- unique(transaction_data$prod_name)
+
+# the first 10 product names
+products[1:10]
+```
+We can observe that there is inconsistency in product names. To better identify chip products, we have to clean the names first. For example, remove the symbol '&' and extra whitespace. 
+```{r}
+# remove the symbol '&' and extra white spaces 
+transaction_data[, prod_name := gsub("&", " ", prod_name)][, prod_name := gsub("\\s{2,}", " ", prod_name)]
+```
+
+Now, we want to summarize the words in the unique product names and examine these words.
+```{r}
+products <- unique(transaction_data$prod_name)
+
+# remove digits from product names 
+for (i in (1:length(products))){
+  # remove digits from product name
+  products[i] <- gsub("[0-9]+[a-zA-Z]", "", products[i])
+  products[i] <- trimws(products[i], which = "both")
+}
+
+# after digits are removed, we can break down each unique product names into individual words 
+product_words <- data.table(unique(unlist(strsplit(products, " "))))
+colnames(product_words) <- 'words'
+
+product_words
+```
+
+```{r}
+# upon reviewing all of the unique product names, we discovered the word 'salsa', which refers to a variety of sauces. As our analysis is solely focused on chips, we need to exclude it from further examination.
+salsa_dt <- transaction_data[grepl("Salsa", transaction_data$prod_name), ]
+salsa_dt
+```
+
+```{r}
+# remove Salsa products from the dataset
+transaction_data <- transaction_data[!grepl("Salsa", transaction_data$prod_name), ]
+```
+
+```{r}
+# check again and ensure there is no salsa product 
+transaction_data[grepl("Salsa", transaction_data$prod_name), ]
+```
+
+After salsa products are removed, there are 246742 rows remaining and these are all chips sales records.
+```{r}
+dim(transaction_data)
+```
+
+After preliminary data cleaning, we should take a look at descriptive statistics of our data and see if there is data that doesn't make sense.
+```{r}
+summary(transaction_data)
+```
+
+```{r}
+# The max product quantity 200 and the max total sales $650 look suspicious. They can be outliers. 
+# There are two identical transactions by the same customer with customer_id 226000
+transaction_data[transaction_data[, prod_qty == 200], ]
+```
+
+```{r}
+# It appears that the customer only makes one purchase per year and bought 200 bags each time. 
+# We decided to remove the two transactions as they don't look like ordinal retail purchases.
+transaction_data <- transaction_data[transaction_data[, prod_qty != 200], ]
+```
+
+```{r}
+dim(transaction_data)
+```
+
+Next, we want to create a column that contains the brand of a product. 
+```{r}
+# use substr() to extract the product brand from each product name
+transaction_data[, brand_name:= toupper(substr(prod_name, 1, regexpr(pattern = " ", prod_name) -1))]
+
+# count the frequency for each brand name and order the count in descending order
+transaction_data[, "brand_name"][, .(brands_count = .N), by = .(brand_name)][order (-brands_count)]
+```
+
+Some brand names are duplicates because they belong to the same brand. For example, 'WW' and 'WOOLWORTHS', 'SMITH' and 'SMITHS', etc
+```{r}
+# create a mapping for the duplicate brand names
+mapping <- c(RED = "RRD", SNBTS = "SUNBITES", INFZNS = "INFUZIONS", WW = "WOOLWORTHS",
+             SMITH = "SMITHS", NCC = "NATURAL", DORITO = "DORITOS", GRAIN = "GRNWVES")
+names(mapping)
+```
+
+```{r}
+# combine the duplicate brand names 
+transaction_data[, brand_name := ifelse(brand_name %in% names(mapping), mapping[brand_name], brand_name)]
+```
+
+```{r}
+# The combining resulted in a total of 20 distinct brands.
+transaction_data[, "brand_name"][, .(brands_count = .N), by = .(brand_name)][order (-brands_count)]
+```
+Create a column 'pack_size' to contain the pack size information of the product.
+```{r}
+# get the pack size for each product 
+transaction_data$pack_size <- parse_number(transaction_data$prod_name)
+```
+
+```{r}
+summary(transaction_data$pack_size)
+```
+
+The pack size ranges from 70g to 380g, which is reasonable. Next we can count the frequency of each pack size and get a sense of which pack size is the most preferred.
+```{r}
+count_pack_size <- transaction_data[, "pack_size"][, .(count = .N), by = pack_size]
+# order the count in descending order 
+count_pack_size <- count_pack_size[order (-count)]
+count_pack_size
+```
+
+Now, let's explore customer_data table
+```{r}
+str(customer_data)
+```
+
+```{r}
+# check the number of unique values per column in the customer_data table
+customer_data %>% summarize_all(n_distinct)
+```
+
+```{r}
+# check if there is any missing values 
+lapply(customer_data, function(x) sum(is.na(x)))
+```
+Let's see the number of customers grouped by "lifestage".
+```{r}
+# total unique number of customers by lifestage 
+lifestage_customers_breakdown <- customer_data[, .(tot_cust = uniqueN(customer_id)), by=lifestage][order (-tot_cust)]
+
+# calculate the percentage
+lifestage_customers_breakdown %>% mutate(percentage = tot_cust/(sum(tot_cust)))
+```
+
+Let's see the number of customers segmented by "premium_customer".
+```{r}
+# total unique number of customers by premium category: Budget, Mainstream and Premium  
+premium_customer_breakdown <- customer_data[, .(tot_cust = uniqueN(customer_id)), 
+                                            by=premium_customer][order (-tot_cust)]
+
+premium_customer_breakdown %>% mutate(percentage = tot_cust/(sum(tot_cust)))
+```
+
+From the outputs, it shows that retirees, older singles/couples and young singles/couples have the highest number of chips consumers. In next step, we will dive deeper into sales performance in each customer segment by comparing sales metrics. 
+```{r}
+# merge the two tables:  transaction_data and customer_data 
+data <- merge(transaction_data, customer_data, all.x = TRUE)
+
+# save the cleaned data for later analysis 
+fwrite(data, "data.csv")
+```
+
+In the next steps, we want to perform data analysis on customer segments 
+
+some metrics of interest:
+
+- Who spend the most on chips in terms of total sales, describing customers' purchasing behavior by life stage and premium
+- How many customers are in each segment
+- How many chips are bought per customer by segment
+- What's the average chip price by customer segment
+
+```{r}
+data <- data.table(fread("data.csv"))
+```
+
+```{r}
+head(data, 10)
+```
+
+```{r}
+str(data)
+```
+
+```{r}
+data$date <- as.Date(data$date, format="%m/%d/%y")
+```
+
+```{r}
+# descriptive statistics of the dataset
+summary(data)
+```
+
+Let's get an overview of the total sales and total quantity sold over the full observation period.
+```{r}
+data1 <- data[, c("date", "tot_sales", "prod_qty")][, date := substring(date, 1, 7)]
+data1 <- data1[, .(sales = sum(tot_sales), tot_qty_sold = sum(prod_qty)), by = date][order (date)]
+
+```
+
+```{r}
+data1$date <- as.Date(paste0(data1$date, "-01"), format = "%Y-%m-%d")
+
+ggplot(data1, aes(x = date)) +
+  geom_bar(aes(y = sales, fill = "Total Sales"), stat = "identity") +
+  geom_line(aes(y = tot_qty_sold * 10, color = "Product Quantity"), size=1.1, yaxis = "right") +
+  scale_y_continuous(
+    name = "Total Sales",
+    sec.axis = sec_axis(~./10, name = "Total Quantity Sold")
+  ) +
+  labs(x = "Date") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  scale_fill_manual(values = c("#0072B2")) +
+  scale_color_manual(values = c("#E69F00"))
+```
+
+To begin with, we group the data by 'lifestage' and 'premium_customer' and calculate these metrics:
+- total sales
+- total quantity sold
+- total number of unique customers
+- and the number of quantity sold per customer
+
+```{r}
+sales_by_segment <- data[, .(sales = sum(tot_sales), tot_cust = uniqueN(customer_id),
+                             tot_qty = sum(prod_qty), 
+                             num_qty_sold_per_cust = sum(prod_qty)/uniqueN(customer_id),
+                             avg_price_unit = sum(tot_sales)/ sum(prod_qty)),
+                         by = .(lifestage, premium_customer)][order (-sales)]
+
+sales_by_segment
+```
+
+```{r}
+# visualize the total sales per customer segment 
+ggplot(sales_by_segment, aes(x = premium_customer, y = sales, fill = factor(lifestage))) + 
+  geom_bar(stat= "identity", position = "dodge") +
+  labs(title = "Total sales per customer segment",
+       x = "premium_customer",
+       y = "total sales",
+       fill = "lifestage")
+```
+
+Observations: 
+From the count plots above, it is apparent that older families in the budget category contribute the most to chips sales and the second largest sales comes from mainstream young singles/couples. And retirees of mainstream segment consumers are the third largest sales group.
+
+```{r}
+# visualize the total number of unique of customers in each segment 
+ggplot(sales_by_segment, aes(x = premium_customer, y = tot_cust, fill = factor(lifestage))) + 
+  geom_bar(stat= "identity", position = "dodge") +
+  labs(title = "Total number of unique customers per customer segment",
+       x = "premium_customer",
+       y = "total number of customers",
+       fill = "lifestage")
+
+```
+
+Observations: 
+Mainstream customers in young single/couples have the most number of unique customers and they contribute way more to the sales compared to the other groups of customers in the same category. Let's explore further about this group of consumers.
+
+Let's explore their purchasing behavior: for example, if they have a preference for a brand or pack size.
+```{r}
+# filter the sales data from this customer segment
+segment <- subset(data, lifestage == "YOUNG SINGLES/COUPLES" & premium_customer == "Mainstream" )
+
+others <- data[!(lifestage == "YOUNG SINGLES/COUPLES" & premium_customer == "Mainstream"), ]
+```
+
+```{r}
+# use table() to find the frequency of each brand in mainstream young singles/couples customer segment
+segment_brand_counts <- data.table(table(segment$brand_name))
+
+# rename columns
+names(segment_brand_counts) <- c("brand_name", "count1")
+
+# calculate the percentage of each brad count 
+segment_brand_counts[, percentage_segment := count1/(sum(count1))]
+
+# top 10 brands preferred by mainstream young singles/couples 
+top10_brand_counts_segment <- segment_brand_counts[order (-count1)][1:10, ]
+
+top10_brand_counts_segment
+
+```
+
+```{r}
+segment_brand_counts
+```
+
+```{r}
+# visualize the count plot for top10 brands liked by the mainstream young singles/couples
+
+ggplot(top10_brand_counts_segment, aes(x = reorder(brand_name, -count1), y = count1, fill = brand_name)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = count1), vjust = -0.1) +
+  xlab("Brand Name") +
+  ylab("Count") +
+  ggtitle("Top 10 Brands Preferred by Mainstream Young Singles/Couples") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+others_brand_counts <- data.table(table(others$brand_name))
+
+names(others_brand_counts) <- c("brand_name", "count2")
+
+others_brand_counts[, percentage_other := count2/sum(count2)]
+others_brand_counts
+
+# top 10 brands by others segments other than mainstream young singles/couples
+top10_brand_counts_others <- others_brand_counts[order (-count2)][1:10, ]
+
+top10_brand_counts_others
+
+```
+
+```{r}
+# visualize the count plot for top10 brands in the segment other than mainstream singles/couples
+ggplot(top10_brand_counts_others, aes(x = reorder(brand_name, -count2), y = count2, fill = brand_name)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = count2), vjust = -0.1) +
+  xlab("Brand Name") +
+  ylab("Count") +
+  ggtitle("Top 10 Brands Preferred by Other Segments") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r}
+brand_counts <- merge(segment_brand_counts, others_brand_counts, by="brand_name")[order (-count1, -count2)]
+brand_counts
+```
+
+```{r}
+top4_brands <- c("KETTLE", "DORITOS", "SMITHS", "PRINGLES")
+
+top4 <- data[data[, brand_name %in% top4_brands], ][, c("brand_name", "pack_size", "tot_sales", "prod_qty")]
+top4 <- top4[, .(tot_qty_sold = sum(prod_qty), avg_unit_price = sum(tot_sales)/sum(prod_qty)), by=.(brand_name, pack_size)][order (pack_size)]
+
+top4
+```
+
+KETTLE is most favorite brand and it sells three pack sizes. The average unit price for the 135g size is $4.2, while 150g sells slightly higher with an average of $4.6. The largest size, 175g sells at average of $5.4.
+```{r}
+top4[top4[, brand_name == "KETTLE"], ]
+```
+
+Below is the unit price for each pack size sold by "DORITOS".
+```{r}
+top4[top4[, brand_name == "DORITOS"], ]
+```
+
+Let's look at the unit price for each pack size sold by "SMITHS". They have more options in terms of pack size and are more economical compared to the two brands above for the same size.
+```{r}
+top4[top4[, brand_name == "SMITHS"], ]
+```
+
+Pringles only sells one size at $3.7.
+```{r}
+top4[top4[, brand_name == "PRINGLES"], ]
+```
+
+Analyze the pack size preference and compare the two groups 
+```{r}
+segment_pack_size_counts <- data.table(table(segment$pack_size))
+
+# rename columns
+names(segment_pack_size_counts) <- c("pack_size", "count1")
+
+# calculate the percentage of each brad count 
+segment_pack_size_counts[, percentage_segment := count1/(sum(count1))]
+
+segment_pack_size_counts[order (-count1)]
+```
+
+```{r}
+top10_pack_size_segment <- segment_pack_size_counts[order (-count1)][1:10, ]
+top10_pack_size_segment
+```
+
+```{r}
+ggplot(top10_pack_size_segment, aes(x = reorder(pack_size, -count1), y = count1, fill = pack_size)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = count1), vjust = -0.1) +
+  xlab("pack size (g)") +
+  ylab("count") +
+  ggtitle("Top 10 pack size preferred by Mainstream Young Singles/Couples") 
+```
+
+```{r}
+others_pack_size_counts <- data.table(table(others$pack_size))
+
+# rename columns
+names(others_pack_size_counts) <- c("pack_size", "count2")
+
+# calculate the percentage of each brad count 
+others_pack_size_counts[, percentage_segment := count2/(sum(count2))]
+
+others_pack_size_counts[order (-count2)]
+```
+
+```{r}
+top10_pack_size_others <- others_pack_size_counts[order (-count2)][1:10, ]
+top10_pack_size_others
+```
+
+```{r}
+ggplot(top10_pack_size_others, aes(x = reorder(pack_size, -count2), y = count2, fill = pack_size)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = count2), vjust = -0.1) +
+  xlab("pack size (g)") +
+  ylab("count") +
+  ggtitle("Top 10 pack size preferred by other than mainstream singles/couples")
+```
+
+Observations: 
+The 175g pack size is the most popular among all customer segments, and majority of consumers prefer pack sizes in the range of 110g to 175g. 
+
+Let's calculate the proportion of total sales by sizes less than or equal to 175g.
+```{r}
+dt <- data[, c("pack_size", "tot_sales")]
+
+# target pack sizes
+sizes <- c(110, 125, 134, 135, 150, 160, 165, 170, 175)
+
+dt <- dt[, .(sales = sum(tot_sales)),by = .(pack_size %in% sizes)]
+
+names(dt) <- c("if_less_than_175g", "sales_sum")
+
+# calculate the percentage 
+dt <- dt %>% mutate(percentage = sales_sum * 100 / sum(sales_sum))
+dt
+```
+The sales generated from pack sizes less than or equal to 175g accounted for 77.89% of the total chips sales.
+
+
+
+
+
+
+
+
